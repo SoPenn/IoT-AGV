@@ -1,7 +1,7 @@
 // --- ใส่ข้อมูล Blynk ของคุณตรงนี้ ---
 #define BLYNK_TEMPLATE_ID "TMPL6O8elIX6O"
 #define BLYNK_TEMPLATE_NAME "IoT AGV"
-#define BLYNK_AUTH_TOKEN "SOobac6t79igF9C9rW9Z5DbBrV1wG2Md"
+#define BLYNK_AUTH_TOKEN "eWq2v0I7HaScoRehzb3VIrs8YOdDJqgb"
 
 #include <WiFi.h>
 #include <WiFiClient.h>
