@@ -32,7 +32,8 @@ const int sensorLeft = 14;
 const int sensorRight = 13;
 
 // --- ตั้งค่าระบบขับเคลื่อนและการกระชาก (Kick-Start) ---
-int motorSpeed = 65;        // ความเร็ววิ่งปกติ
+int motorSpeed = 62;        // ความเร็ววิ่งปกติ
+int turnSpeed = 65;         // ความเร็วตอนเลี้ยว
 int kickSpeed = 90;         // ความเร็วตอนกระชากออกตัว
 int kickDuration_ms = 200;  // ระยะเวลาที่กระชาก (มิลลิวินาที) 200นี่คือต่ำสุดแล้ว
 bool isStopped = true;      // ตัวแปรเช็กว่ารถกำลังหยุดนิ่งหรือไม่
@@ -56,8 +57,9 @@ bool checkArrivalByColor();
 bool lineTracking();
 void handleIntersection();
 void skipIntersection();
-void turnRight90();
-void turn2Right90();
+void turnRight();
+void turnLeft();
+void turn2Right();
 
 void setup() {
   Serial.begin(115200);
@@ -167,22 +169,26 @@ void colorSensorTask(void* pvParameters) {
     String detectedColor = "START_OR_PATH";
     String colorTextForBlynk = "IS NOT A STATION";
 
-    if (r > 90 && g > 140 && g < 230 && b > 130) {
+    if (r > 90 && g > 140 && g < 240 && b > 150) {
       detectedColor = "START_OR_PATH";
       colorTextForBlynk = "IS NOT A STATION";
     } else if (r > g && r > b && r > 60) {
       detectedColor = "RED_S2";
       colorTextForBlynk = "RED_S2";
-    } else if (r > 90 && r < 150 && g > 240 && g < 360 && b > 90 && b < 200) {
+    } else if (r > 80 && r < 165 && g > 160 && g < 360 && b > 90 && b < 230) {
       detectedColor = "GREEN_S3";
       colorTextForBlynk = "GREEN_S3";
-    } else if (b > r && b > g && b > 100) {
+    } else if (r > 49 && r < 90 && g > 130 && g < 240 && b > 180 && b < 365) {
       detectedColor = "BLUE_S1";
       colorTextForBlynk = "BLUE_S1";
     } else {
       detectedColor = "START_OR_PATH";
       colorTextForBlynk = "IS NOT A STATION";
     }
+
+    // 🌟 DEBUG: ปริ้นท์บอกว่าตอนนี้ตีความเป็นสีอะไร
+    Serial.print("[DETECTED] "); 
+    Serial.println(detectedColor);
 
     globalDetectedColor = detectedColor;
 
@@ -292,13 +298,13 @@ bool lineTracking() {
     moveForward();
   } else if (valLeft == 0 && valRight == 1) {  // ซ้ายขาว(0) ขวาดำ(1) -> เลี้ยวขวา
     analogWrite(ENA, 0);
-    analogWrite(ENB, 60);
+    analogWrite(ENB, 57);
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, LOW);
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
   } else if (valLeft == 1 && valRight == 0) {  // ซ้ายดำ(1) ขวาขาว(0) -> เลี้ยวซ้าย
-    analogWrite(ENA, 60);
+    analogWrite(ENA, 57);
     analogWrite(ENB, 0);
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
@@ -324,8 +330,8 @@ void runRoute(const char* route) {
   for (int i = 0; route[i] != '\0'; i++) {
     if (isWaitingForCommand) return;
     if (route[i] == 'S') skipIntersection();
-    else if (route[i] == 'T') turnRight90();
-    else if (route[i] == '2') turn2Right90();
+    else if (route[i] == 'R') turnRight();
+    else if (route[i] == 'L') turnLeft();
   }
 }
 
@@ -349,26 +355,26 @@ void handleIntersection() {
   }
 
   if (currentStation == "START") {
-    if (targetStation == "BLUE_S1") runRoute("SST");
-    else if (targetStation == "RED_S2") runRoute("ST");
-    else if (targetStation == "GREEN_S3") runRoute("SSTSTSST");
+    if (targetStation == "BLUE_S1") runRoute("LSRSSR");
+    else if (targetStation == "RED_S2") runRoute("LSRSR");
+    else if (targetStation == "GREEN_S3") runRoute("L");
   } else if (currentStation == "BLUE_S1") {
-    if (targetStation == "RED_S2") runRoute("TSSTSTST");
-    else if (targetStation == "GREEN_S3") runRoute("TSST");
+    if (targetStation == "RED_S2") runRoute("RSSRSRSR");
+    else if (targetStation == "GREEN_S3") runRoute("RSSR");
     else if (targetStation == "START") {
       runRoute("S2SS2S2");
       arrivedAtStart();
     }
   } else if (currentStation == "RED_S2") {
-    if (targetStation == "BLUE_S1") runRoute("TSTS2SST");
-    else if (targetStation == "GREEN_S3") runRoute("TST");
+    if (targetStation == "BLUE_S1") runRoute("RSRSRSSR");
+    else if (targetStation == "GREEN_S3") runRoute("RSR");
     else if (targetStation == "START") {
       runRoute("S2S2S2");
       arrivedAtStart();
     }
   } else if (currentStation == "GREEN_S3") {
-    if (targetStation == "BLUE_S1") runRoute("TSST");
-    else if (targetStation == "RED_S2") runRoute("TST");
+    if (targetStation == "BLUE_S1") runRoute("RSSR");
+    else if (targetStation == "RED_S2") runRoute("RSR");
     else if (targetStation == "START") {
       runRoute("S2");
       arrivedAtStart();
@@ -376,38 +382,45 @@ void handleIntersection() {
   }
 }
 
-void turnLeft90() {
+void turnLeft() {
   if (isWaitingForCommand) return;
+  stopMotor();
+  delay(250);
+
   if (isStopped == true) {
     analogWrite(ENA, kickSpeed);
     analogWrite(ENB, kickSpeed);
     moveForward();
-    delay(kickDuration_ms);
+    delay(250);
     isStopped = false;
   }
-  analogWrite(ENA, motorSpeed);
-  analogWrite(ENB, motorSpeed);
-  moveForward();
-  delay(300);
 
-  analogWrite(ENA, motorSpeed);
-  analogWrite(ENB, motorSpeed);
+  if (isWaitingForCommand) return;
+  analogWrite(ENA, turnSpeed);
+  analogWrite(ENB, turnSpeed);
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, HIGH);
-  delay(300);
 
-  while (digitalRead(sensorLeft) == 0) {
-    if (isWaitingForCommand) return;
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+  int blackCount = 0;
+  int lastState = digitalRead(sensorLeft);
+
+  while (blackCount < 1) {
+    if (checkArrivalByColor() || isWaitingForCommand) return;
+    int currentState = digitalRead(sensorLeft);
+    if (lastState == 0 && currentState == 1) blackCount++;
+    lastState = currentState;
+    vTaskDelay(5 / portTICK_PERIOD_MS);
   }
+
   if (isWaitingForCommand) return;
   stopMotor();
+  isStopped = false; // 🌟 แก้ตรงนี้: ข้ามการกระชากตอนเริ่ม lineTracking
   Blynk.virtualWrite(V4, "IS NOT A STATION");
 }
 
-void turn2Right90() {
+void turn2Right() {
   if (isWaitingForCommand) return;
   if (isStopped == true) {
     analogWrite(ENA, kickSpeed);
@@ -429,8 +442,8 @@ void turn2Right90() {
   delay(250);
 
   if (isWaitingForCommand) return;
-  analogWrite(ENA, 72);
-  analogWrite(ENB, 72);
+  analogWrite(ENA, turnSpeed);
+  analogWrite(ENB, turnSpeed);
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, HIGH);
   digitalWrite(IN3, HIGH);
@@ -449,10 +462,11 @@ void turn2Right90() {
 
   if (isWaitingForCommand) return;
   stopMotor();
+  isStopped = false; // 🌟 แก้ตรงนี้: ข้ามการกระชากตอนเริ่ม lineTracking
   Blynk.virtualWrite(V4, "IS NOT A STATION");
 }
 
-void turnRight90() {
+void turnRight() {
   if (isWaitingForCommand) return;
   stopMotor();
   delay(250);
@@ -461,13 +475,13 @@ void turnRight90() {
     analogWrite(ENA, kickSpeed);
     analogWrite(ENB, kickSpeed);
     moveForward();
-    delay(200);
+    delay(250);
     isStopped = false;
   }
 
   if (isWaitingForCommand) return;
-  analogWrite(ENA, 72);
-  analogWrite(ENB, 72);
+  analogWrite(ENA, turnSpeed);
+  analogWrite(ENB, turnSpeed);
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, HIGH);
   digitalWrite(IN3, HIGH);
@@ -486,6 +500,7 @@ void turnRight90() {
 
   if (isWaitingForCommand) return;
   stopMotor();
+  isStopped = false; // 🌟 แก้ตรงนี้: ข้ามการกระชากตอนเริ่ม lineTracking
   Blynk.virtualWrite(V4, "IS NOT A STATION");
 }
 
