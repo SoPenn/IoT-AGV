@@ -1,0 +1,507 @@
+// --- ใส่ข้อมูล Blynk ของคุณตรงนี้ ---
+#define BLYNK_TEMPLATE_ID "TMPL6O8elIX6O"
+#define BLYNK_TEMPLATE_NAME "IoT AGV"
+#define BLYNK_AUTH_TOKEN "SOobac6t79igF9C9rW9Z5DbBrV1wG2Md"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include "Adafruit_TCS34725.h"
+
+// --- ข้อมูลอินเทอร์เน็ต ---
+char ssid[] = "Galaxy Destroyer";
+char pass[] = "0803018213a";
+
+// --- กำหนดพินเซนเซอร์สี (I2C) ---
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
+
+// --- กำหนดพินมอเตอร์ซ้าย ---
+const int IN1 = 19;
+const int IN2 = 4;
+const int ENA = 18;
+
+// --- กำหนดพินมอเตอร์ขวา ---
+const int IN3 = 16;
+const int IN4 = 17;
+const int ENB = 27;
+
+// --- กำหนดพินเซนเซอร์เดินตามเส้น ---
+const int sensorLeft = 14;
+const int sensorRight = 13;
+
+// --- ตั้งค่าระบบขับเคลื่อนและการกระชาก (Kick-Start) ---
+int motorSpeed = 65;        // ความเร็ววิ่งปกติ
+int kickSpeed = 90;         // ความเร็วตอนกระชากออกตัว
+int kickDuration_ms = 200;  // ระยะเวลาที่กระชาก (มิลลิวินาที) 200นี่คือต่ำสุดแล้ว
+bool isStopped = true;      // ตัวแปรเช็กว่ารถกำลังหยุดนิ่งหรือไม่
+
+// --- ระบบเซนเซอร์สีและการจำสถานะ ---
+Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+
+// 🌟 ตัวแปรจดจำว่าหุ่นยนต์เพิ่งออกมาจากสถานีไหน (เริ่มต้นที่ P1 ฝั่งซ้าย)
+String currentStation = "START";
+
+// ตัวแปรสำหรับ Blynk และการแยก Core (FreeRTOS)
+String targetStation = "NONE";
+bool isWaitingForCommand = true;
+String globalDetectedColor = "START_OR_PATH";
+
+TaskHandle_t RobotTask;
+TaskHandle_t ColorTask;
+
+// ประกาศฟังก์ชันล่วงหน้า
+bool checkArrivalByColor();
+bool lineTracking();
+void handleIntersection();
+void skipIntersection();
+void turnRight90();
+void turn2Right90();
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(sensorLeft, INPUT);
+  pinMode(sensorRight, INPUT);
+
+  Serial.println("Connecting to Blynk...");
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, pass);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n=================================");
+    Serial.println("✅ WiFi Connected!");
+    Serial.print("📡 IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.println("=================================");
+
+    Serial.println("Connecting to Blynk Server...");
+    Blynk.config(BLYNK_AUTH_TOKEN);
+    if (Blynk.connect()) {
+      Serial.println("✅ Blynk Connected!");
+    } else {
+      Serial.println("❌ Blynk Connection Failed! (Hotspot บล็อกพอร์ต)");
+    }
+  } else {
+    Serial.println("\n❌ WiFi Failed! (รหัสผิด หรือมือถือไม่ได้ปล่อย 2.4GHz หรือลองรีโทรศัพท์)");
+  }
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setTimeOut(100);
+
+  if (tcs.begin()) {
+    Serial.println("Found Color Sensor!");
+    tcs.setInterrupt(false);
+  } else {
+    Serial.println("No Color Sensor found ... check wiring.");
+  }
+
+  stopMotor();
+  Blynk.virtualWrite(V0, "Standby. Waiting for command.");
+  Blynk.virtualWrite(V4, "IS NOT A STATION");
+
+  // Core 0: สำหรับคุมล้อและอินฟราเรด
+  xTaskCreatePinnedToCore(robotControlTask, "RobotTask", 10000, NULL, 1, &RobotTask, 0);
+
+  // Core 1: สำหรับเซนเซอร์สีและแอป Blynk
+  xTaskCreatePinnedToCore(colorSensorTask, "ColorTask", 10000, NULL, 1, &ColorTask, 1);
+
+  delay(1000);
+}
+
+void loop() {
+  Blynk.run();
+}
+
+void robotControlTask(void* pvParameters) {
+  for (;;) {
+    if (!isWaitingForCommand) {
+      if (lineTracking()) {
+        if (!isWaitingForCommand) {
+          handleIntersection();
+        }
+      }
+    } else {
+      stopMotor();
+    }
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+  }
+}
+
+void colorSensorTask(void* pvParameters) {
+  String lastColorText = "";
+  for (;;) {
+    uint16_t r = 0, g = 0, b = 0, c = 0;
+    tcs.getRawData(&r, &g, &b, &c);
+
+    // 🌟 DEBUG: แสดงค่าเซนเซอร์สีดิบทาง Serial Monitor
+    Serial.print("[COLOR DEBUG] R: ");
+    Serial.print(r);
+    Serial.print(" | G: ");
+    Serial.print(g);
+    Serial.print(" | B: ");
+    Serial.print(b);
+    Serial.print(" | C: ");
+    Serial.println(c);
+
+    if (r == 0 && g == 0 && b == 0) {
+      Wire.begin(SDA_PIN, SCL_PIN);
+      tcs.begin();
+    }
+
+    String detectedColor = "START_OR_PATH";
+    String colorTextForBlynk = "IS NOT A STATION";
+
+    if (r > 90 && g > 140 && g < 230 && b > 130) {
+      detectedColor = "START_OR_PATH";
+      colorTextForBlynk = "IS NOT A STATION";
+    } else if (r > g && r > b && r > 60) {
+      detectedColor = "RED_S2";
+      colorTextForBlynk = "RED_S2";
+    } else if (r > 90 && r < 150 && g > 240 && g < 360 && b > 90 && b < 200) {
+      detectedColor = "GREEN_S3";
+      colorTextForBlynk = "GREEN_S3";
+    } else if (b > r && b > g && b > 100) {
+      detectedColor = "BLUE_S1";
+      colorTextForBlynk = "BLUE_S1";
+    } else {
+      detectedColor = "START_OR_PATH";
+      colorTextForBlynk = "IS NOT A STATION";
+    }
+
+    globalDetectedColor = detectedColor;
+
+    if (colorTextForBlynk != lastColorText) {
+      Blynk.virtualWrite(V4, colorTextForBlynk);
+      lastColorText = colorTextForBlynk;
+    }
+    vTaskDelay(150 / portTICK_PERIOD_MS);
+  }
+}
+
+// รับคำสั่งจากปุ่มในแอป Blynk
+BLYNK_WRITE(V1) {
+  if (param.asInt() == 1) {
+    targetStation = "BLUE_S1";
+    isWaitingForCommand = false;
+    Blynk.virtualWrite(V0, "Moving to BLUE S1");
+  }
+}
+
+BLYNK_WRITE(V2) {
+  if (param.asInt() == 1) {
+    targetStation = "RED_S2";
+    isWaitingForCommand = false;
+    Blynk.virtualWrite(V0, "Moving to RED S2");
+  }
+}
+
+BLYNK_WRITE(V3) {
+  if (param.asInt() == 1) {
+    targetStation = "GREEN_S3";
+    isWaitingForCommand = false;
+    Blynk.virtualWrite(V0, "Moving to GREEN S3");
+  }
+}
+
+BLYNK_WRITE(V5) {
+  if (param.asInt() == 1) {
+    targetStation = "START";
+    isWaitingForCommand = false;
+    Blynk.virtualWrite(V0, "Returning to START (P1)");
+  }
+}
+
+// ฟังก์ชันควบคุมมอเตอร์พื้นฐาน
+void moveForward() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void stopMotor() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+  isStopped = true;
+}
+
+// 🌟 ฟังก์ชันเช็กเป้าหมาย: หยุดสนิทและเซ็ต isStopped เป็น true
+bool checkArrivalByColor() {
+  if (!isWaitingForCommand && targetStation != "NONE" && targetStation != "START" && globalDetectedColor == targetStation) {
+    stopMotor();
+    Serial.println("Arrived at Target Station! Stopping completely.");
+    Blynk.virtualWrite(V0, "Arrived at " + targetStation);
+    currentStation = targetStation;
+    isWaitingForCommand = true;
+    targetStation = "NONE";
+    isStopped = true;
+    return true;
+  }
+  return false;
+}
+
+// --- ตัวแปรเก็บเวลาสำหรับเช็กทางตรงยาว ---
+unsigned long whiteTimeStart = 0;
+bool isSlowedDown = false;
+
+bool lineTracking() {
+  if (checkArrivalByColor()) return true;
+
+  int valLeft = digitalRead(sensorLeft);
+  int valRight = digitalRead(sensorRight);
+
+  if (valLeft == 1 && valRight == 1) {  // ดำทั้งคู่(1,1) -> เจอทางแยก
+    stopMotor();
+    delay(400);
+    return true;
+  }
+
+  // 🌟 ดักเช็กจังหวะเริ่มออกตัวจากที่จอดนิ่ง (กระชาก)
+  if (isStopped == true) {
+    analogWrite(ENA, kickSpeed);
+    analogWrite(ENB, kickSpeed);
+    moveForward();
+    delay(kickDuration_ms);
+    isStopped = false;
+  }
+
+  // ลอจิกเดินตามเส้นปกติ (เมื่อรถวิ่งอยู่แล้ว)
+  if (valLeft == 0 && valRight == 0) {  // ขาวทั้งคู่(0,0) -> ตรง
+    analogWrite(ENA, motorSpeed);
+    analogWrite(ENB, motorSpeed);
+    moveForward();
+  } else if (valLeft == 0 && valRight == 1) {  // ซ้ายขาว(0) ขวาดำ(1) -> เลี้ยวขวา
+    analogWrite(ENA, 0);
+    analogWrite(ENB, 60);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+  } else if (valLeft == 1 && valRight == 0) {  // ซ้ายดำ(1) ขวาขาว(0) -> เลี้ยวซ้าย
+    analogWrite(ENA, 60);
+    analogWrite(ENB, 0);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+  }
+  return false;
+}
+
+// 📍 ชุดคำสั่งเสริมเพื่อย่อลอจิกการนำทาง
+void arrivedAtStart() {
+  if (isWaitingForCommand) return;
+  stopMotor();
+  Serial.println("Arrived at START (P1)!");
+  Blynk.virtualWrite(V0, "Arrived at START");
+  currentStation = "START";
+  isWaitingForCommand = true;
+  targetStation = "NONE";
+  isStopped = true;
+}
+
+void runRoute(const char* route) {
+  for (int i = 0; route[i] != '\0'; i++) {
+    if (isWaitingForCommand) return;
+    if (route[i] == 'S') skipIntersection();
+    else if (route[i] == 'T') turnRight90();
+    else if (route[i] == '2') turn2Right90();
+  }
+}
+
+// 📍 ฟังก์ชันจัดการทางแยกและระบบนำทาง (Routing)
+void handleIntersection() {
+  if (isWaitingForCommand) return;
+
+  Serial.print("[Routing] Current Station: ");
+  Serial.println(currentStation);
+  Serial.print("[Routing] Target Station: ");
+  Serial.println(targetStation);
+
+  if (globalDetectedColor != "START_OR_PATH" && globalDetectedColor == targetStation) {
+    stopMotor();
+    Blynk.virtualWrite(V0, "Arrived at " + targetStation);
+    currentStation = targetStation;
+    isWaitingForCommand = true;
+    targetStation = "NONE";
+    isStopped = true;
+    return;
+  }
+
+  if (currentStation == "START") {
+    if (targetStation == "BLUE_S1") runRoute("SST");
+    else if (targetStation == "RED_S2") runRoute("ST");
+    else if (targetStation == "GREEN_S3") runRoute("SSTSTSST");
+  } else if (currentStation == "BLUE_S1") {
+    if (targetStation == "RED_S2") runRoute("TSSTSTST");
+    else if (targetStation == "GREEN_S3") runRoute("TSST");
+    else if (targetStation == "START") {
+      runRoute("S2SS2S2");
+      arrivedAtStart();
+    }
+  } else if (currentStation == "RED_S2") {
+    if (targetStation == "BLUE_S1") runRoute("TSTS2SST");
+    else if (targetStation == "GREEN_S3") runRoute("TST");
+    else if (targetStation == "START") {
+      runRoute("S2S2S2");
+      arrivedAtStart();
+    }
+  } else if (currentStation == "GREEN_S3") {
+    if (targetStation == "BLUE_S1") runRoute("TSST");
+    else if (targetStation == "RED_S2") runRoute("TST");
+    else if (targetStation == "START") {
+      runRoute("S2");
+      arrivedAtStart();
+    }
+  }
+}
+
+void turnLeft90() {
+  if (isWaitingForCommand) return;
+  if (isStopped == true) {
+    analogWrite(ENA, kickSpeed);
+    analogWrite(ENB, kickSpeed);
+    moveForward();
+    delay(kickDuration_ms);
+    isStopped = false;
+  }
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  moveForward();
+  delay(300);
+
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  delay(300);
+
+  while (digitalRead(sensorLeft) == 0) {
+    if (isWaitingForCommand) return;
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+  if (isWaitingForCommand) return;
+  stopMotor();
+  Blynk.virtualWrite(V4, "IS NOT A STATION");
+}
+
+void turn2Right90() {
+  if (isWaitingForCommand) return;
+  if (isStopped == true) {
+    analogWrite(ENA, kickSpeed);
+    analogWrite(ENB, kickSpeed);
+    moveForward();
+    delay(kickDuration_ms);
+    isStopped = false;
+  }
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < 250) {
+    if (isWaitingForCommand) return;
+    lineTracking();
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+
+  if (isWaitingForCommand) return;
+  stopMotor();
+  delay(250);
+
+  if (isWaitingForCommand) return;
+  analogWrite(ENA, 72);
+  analogWrite(ENB, 72);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+
+  int blackCount = 0;
+  int lastState = digitalRead(sensorRight);
+
+  while (blackCount < 1) {
+    if (checkArrivalByColor() || isWaitingForCommand) return;
+    int currentState = digitalRead(sensorRight);
+    if (lastState == 0 && currentState == 1) blackCount++;
+    lastState = currentState;
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+  }
+
+  if (isWaitingForCommand) return;
+  stopMotor();
+  Blynk.virtualWrite(V4, "IS NOT A STATION");
+}
+
+void turnRight90() {
+  if (isWaitingForCommand) return;
+  stopMotor();
+  delay(250);
+
+  if (isStopped == true) {
+    analogWrite(ENA, kickSpeed);
+    analogWrite(ENB, kickSpeed);
+    moveForward();
+    delay(200);
+    isStopped = false;
+  }
+
+  if (isWaitingForCommand) return;
+  analogWrite(ENA, 72);
+  analogWrite(ENB, 72);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+
+  int blackCount = 0;
+  int lastState = digitalRead(sensorRight);
+
+  while (blackCount < 1) {
+    if (checkArrivalByColor() || isWaitingForCommand) return;
+    int currentState = digitalRead(sensorRight);
+    if (lastState == 0 && currentState == 1) blackCount++;
+    lastState = currentState;
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+  }
+
+  if (isWaitingForCommand) return;
+  stopMotor();
+  Blynk.virtualWrite(V4, "IS NOT A STATION");
+}
+
+void skipIntersection() {
+  if (isWaitingForCommand) return;
+  if (isStopped == true) {
+    analogWrite(ENA, kickSpeed);
+    analogWrite(ENB, kickSpeed);
+    moveForward();
+    delay(kickDuration_ms);
+    isStopped = false;
+  }
+
+  while (true) {
+    if (isWaitingForCommand) return;
+    if (lineTracking()) break;
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
