@@ -167,16 +167,16 @@ void colorSensorTask(void* pvParameters) {
     String detectedColor = "START_OR_PATH";
     String colorTextForBlynk = "IS NOT A STATION";
 
-    if (r > 90 && g > 140 && g < 230 && b > 130) {
+    if (r > 90 && g > 140 && g < 240 && b > 150) {
       detectedColor = "START_OR_PATH";
       colorTextForBlynk = "IS NOT A STATION";
     } else if (r > g && r > b && r > 60) {
       detectedColor = "RED_S2";
       colorTextForBlynk = "RED_S2";
-    } else if (r > 90 && r < 150 && g > 240 && g < 360 && b > 90 && b < 200) {
+    } else if (r > 80 && r < 165 && g > 160 && g < 360 && b > 90 && b < 230) {
       detectedColor = "GREEN_S3";
       colorTextForBlynk = "GREEN_S3";
-    } else if (b > r && b > g && b > 100) {
+    } else if (r > 49 && r < 90 && g > 130 && g < 240 && b > 180 && b < 365) {
       detectedColor = "BLUE_S1";
       colorTextForBlynk = "BLUE_S1";
     } else {
@@ -184,13 +184,17 @@ void colorSensorTask(void* pvParameters) {
       colorTextForBlynk = "IS NOT A STATION";
     }
 
+    // 🌟 DEBUG: ปริ้นท์บอกว่าตอนนี้ตีความเป็นสีอะไร
+    Serial.print("[DETECTED] "); 
+    Serial.println(detectedColor);
+
     globalDetectedColor = detectedColor;
 
     if (colorTextForBlynk != lastColorText) {
       Blynk.virtualWrite(V4, colorTextForBlynk);
       lastColorText = colorTextForBlynk;
     }
-    vTaskDelay(150 / portTICK_PERIOD_MS);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
@@ -400,7 +404,7 @@ void turnLeft90() {
 
   while (digitalRead(sensorLeft) == 0) {
     if (isWaitingForCommand) return;
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    vTaskDelay(5 / portTICK_PERIOD_MS);
   }
   if (isWaitingForCommand) return;
   stopMotor();
@@ -421,7 +425,7 @@ void turn2Right90() {
   while (millis() - startTime < 250) {
     if (isWaitingForCommand) return;
     lineTracking();
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    vTaskDelay(5 / portTICK_PERIOD_MS);
   }
 
   if (isWaitingForCommand) return;
@@ -502,6 +506,6 @@ void skipIntersection() {
   while (true) {
     if (isWaitingForCommand) return;
     if (lineTracking()) break;
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    vTaskDelay(5 / portTICK_PERIOD_MS);
   }
 }
