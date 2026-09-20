@@ -10,8 +10,8 @@
 #include "Adafruit_TCS34725.h"
 
 // --- ข้อมูลอินเทอร์เน็ต ---
-char ssid[] = "Galaxy Destroyer";
-char pass[] = "0803018213a";
+char ssid[] = "KMITL-WiFi";
+char pass[] = "";
 
 // --- กำหนดพินเซนเซอร์สี (I2C) ---
 const int SDA_PIN = 21;
@@ -32,7 +32,7 @@ const int sensorLeft = 14;
 const int sensorRight = 13;
 
 // --- ตั้งค่าระบบขับเคลื่อนและการกระชาก (Kick-Start) ---
-int motorSpeed = 65;        // ความเร็ววิ่งปกติ
+int motorSpeed = 63;        // ความเร็ววิ่งปกติ
 int kickSpeed = 90;         // ความเร็วตอนกระชากออกตัว
 int kickDuration_ms = 200;  // ระยะเวลาที่กระชาก (มิลลิวินาที) 200นี่คือต่ำสุดแล้ว
 bool isStopped = true;      // ตัวแปรเช็กว่ารถกำลังหยุดนิ่งหรือไม่
@@ -295,19 +295,19 @@ bool lineTracking() {
     analogWrite(ENB, motorSpeed);
     moveForward();
   } else if (valLeft == 0 && valRight == 1) {  // ซ้ายขาว(0) ขวาดำ(1) -> เลี้ยวขวา
-    analogWrite(ENA, 0);
-    analogWrite(ENB, 60);
+    analogWrite(ENA, 30);
+    analogWrite(ENB, 70);
     digitalWrite(IN1, LOW);
-    digitalWrite(IN2, LOW);
+    digitalWrite(IN2, HIGH);
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
   } else if (valLeft == 1 && valRight == 0) {  // ซ้ายดำ(1) ขวาขาว(0) -> เลี้ยวซ้าย
-    analogWrite(ENA, 60);
-    analogWrite(ENB, 0);
+    analogWrite(ENA, 70);
+    analogWrite(ENB, 30);
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
     digitalWrite(IN3, LOW);
-    digitalWrite(IN4, LOW);
+    digitalWrite(IN4, HIGH);
   }
   return false;
 }
@@ -364,7 +364,7 @@ void handleIntersection() {
       arrivedAtStart();
     }
   } else if (currentStation == "RED_S2") {
-    if (targetStation == "BLUE_S1") runRoute("TSTS2SST");
+    if (targetStation == "BLUE_S1") runRoute("TSTSTSST");
     else if (targetStation == "GREEN_S3") runRoute("TST");
     else if (targetStation == "START") {
       runRoute("S2S2S2");
@@ -465,7 +465,7 @@ void turnRight90() {
     analogWrite(ENA, kickSpeed);
     analogWrite(ENB, kickSpeed);
     moveForward();
-    delay(200);
+    delay(250);
     isStopped = false;
   }
 
