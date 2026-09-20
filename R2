@@ -10,8 +10,8 @@
 #include "Adafruit_TCS34725.h"
 
 // --- ข้อมูลอินเทอร์เน็ต ---
-char ssid[] = "Galaxy Destroyer";
-char pass[] = "0803018213a";
+char ssid[] = "KMITL-WiFi";
+char pass[] = "";
 
 // --- กำหนดพินเซนเซอร์สี (I2C) ---
 const int SDA_PIN = 21;
@@ -32,10 +32,10 @@ const int sensorLeft = 14;
 const int sensorRight = 13;
 
 // --- ตั้งค่าระบบขับเคลื่อนและการกระชาก (Kick-Start) ---
-int motorSpeed = 62;        // ความเร็ววิ่งปกติ
+int motorSpeed = 60;        // ความเร็ววิ่งปกติ
 int turnSpeed = 65;         // ความเร็วตอนเลี้ยว
 int kickSpeed = 90;         // ความเร็วตอนกระชากออกตัว
-int kickDuration_ms = 200;  // ระยะเวลาที่กระชาก (มิลลิวินาที) 200นี่คือต่ำสุดแล้ว
+int kickDuration_ms = 250;  // ระยะเวลาที่กระชาก (มิลลิวินาที) 200นี่คือต่ำสุดแล้ว
 bool isStopped = true;      // ตัวแปรเช็กว่ารถกำลังหยุดนิ่งหรือไม่
 
 // --- ระบบเซนเซอร์สีและการจำสถานะ ---
@@ -297,19 +297,19 @@ bool lineTracking() {
     analogWrite(ENB, motorSpeed);
     moveForward();
   } else if (valLeft == 0 && valRight == 1) {  // ซ้ายขาว(0) ขวาดำ(1) -> เลี้ยวขวา
-    analogWrite(ENA, 0);
-    analogWrite(ENB, 57);
+    analogWrite(ENA, 90);
+    analogWrite(ENB, 60);
     digitalWrite(IN1, LOW);
-    digitalWrite(IN2, LOW);
+    digitalWrite(IN2, HIGH);
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
   } else if (valLeft == 1 && valRight == 0) {  // ซ้ายดำ(1) ขวาขาว(0) -> เลี้ยวซ้าย
-    analogWrite(ENA, 57);
-    analogWrite(ENB, 0);
+    analogWrite(ENA, 90);
+    analogWrite(ENB, 60);
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
     digitalWrite(IN3, LOW);
-    digitalWrite(IN4, LOW);
+    digitalWrite(IN4, HIGH);
   }
   return false;
 }
@@ -510,7 +510,7 @@ void skipIntersection() {
     analogWrite(ENA, kickSpeed);
     analogWrite(ENB, kickSpeed);
     moveForward();
-    delay(kickDuration_ms);
+    delay(250);
     isStopped = false;
   }
 
