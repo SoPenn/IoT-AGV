@@ -22,17 +22,17 @@ const int SDA_PIN = 21;
 const int SCL_PIN = 22;
 const int IN1 = 19;
 const int IN2 = 4;
-const int ENA = 18;
+const int ENA = 18; // ขวา
 const int IN3 = 16;
 const int IN4 = 17;
-const int ENB = 27;
+const int ENB = 27; // ซ้าย
 const int sensorLeft = 14;
 const int sensorRight = 13;
 
-int motorSpeed = 65;
-int turnSpeed = 72;
+int motorSpeed = 67;
+int turnSpeed = 70;
 int kickSpeed = 90;
-int kickDuration_ms = 200;
+int kickDuration_ms = 250;
 bool isStopped = true;
 
 Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
@@ -46,6 +46,7 @@ volatile bool isWaitingForCommand = true;
 
 String friendStation = "NONE";
 String friendTarget = "NONE";  // 🌟 ตัวแปรใหม่เก็บเป้าหมายที่ r2 กำลังจะไป
+volatile bool isR2Working = false; // 🌟 เพิ่มตัวแปรเช็กว่า r2 กำลังทำงานอยู่หรือไม่ เพื่อบังคับให้ทำทีละตัว
 
 TaskHandle_t RobotTask;
 TaskHandle_t ColorTask;
@@ -66,6 +67,8 @@ void skipIntersection();
 void turnRight();
 void turnLeft();
 void moveForward();
+void moveRight();
+void moveLeft();
 void stopMotor();
 void arrivedAtStart();
 void runRoute(const char* route);
@@ -127,26 +130,44 @@ void setup() {
       return;
     }
 
-    uint8_t targetID = 4;
+    uint8_t targetID = 0; // 🌟 แก้จาก 4 เป็น 0 เพื่อป้องกันบั๊กคำสั่งแปลกๆ เข้ามาแล้ววิ่งไป START เอง
     if (cmd == "GO_BLUE") targetID = 1;        // BLUE_S1 = 1
     else if (cmd == "GO_RED") targetID = 2;    // RED_S2 = 2
     else if (cmd == "GO_GREEN") targetID = 3;  // GREEN_S3 = 3
     else if (cmd == "GO_START") targetID = 4;  // START = 4
 
     if (targetID != 0) {
-      String targetStr = getStationName(targetID);
+      
+      // 🌟 1. ป้องกันการกดสั่งซ้ำขณะหุ่นยนต์กำลังทำงาน
+      if (!isWaitingForCommand) {
+        Serial.println("❌ ไม่อนุญาตให้ทำงาน! หุ่นยนต์ r1 กำลังวิ่งอยู่ (ไม่รับคำสั่งซ้อน)");
+        return; // ปฏิเสธคำสั่งและออกจากฟังก์ชัน
+      }
+
+      // 🌟 2. ป้องกันการสั่งไปเป้าหมายที่เป็นจุดเดียวกับจุดที่จอดอยู่ปัจจุบัน
+      if (targetID == currentStationID) {
+        Serial.println("❌ ไม่อนุญาตให้ทำงาน! หุ่นยนต์ r1 อยู่ที่ " + getStationName(currentStationID) + " อยู่แล้ว");
+        return; // ปฏิเสธคำสั่งและออกจากฟังก์ชัน
+      }
+
+      // 🌟 ระบบล็อกการทำงานทีละตัว: ถ้า r2 กำลังวิ่งอยู่ r1 จะปฏิเสธคำสั่ง
+      if (isR2Working) {
+        Serial.println("❌ ไม่อนุญาตให้ทำงาน! หุ่นยนต์ r2 กำลังทำงานอยู่ (ระบบบังคับทำทีละตัว)");
+        sendMqttSafe("agv/r1/status", "Standby (Waiting for R2)");
+        return; // ปฏิเสธคำสั่งและออกจากฟังก์ชัน
+      }
 
       // 🚨 ระบบกันชนอัจฉริยะ: เช็กทั้งตำแหน่งปัจจุบันของ r2 และเป้าหมายที่ r2 กำลังจะไป
-      bool isR2AtTarget = (friendStation == targetStr);
-      bool isR2TargetingIt = (friendTarget == targetStr);
+      bool isR2AtTarget = (friendStation == getStationName(targetID));
+      bool isR2TargetingIt = (friendTarget == getStationName(targetID));
 
-      if ((isR2AtTarget || isR2TargetingIt) && targetStr != "START") {
-        Serial.println("❌ ไปไม่ได้! r2 จอดขวางหรือกำลังมุ่งหน้าไปที่ " + targetStr);
+      if ((isR2AtTarget || isR2TargetingIt) && getStationName(targetID) != "START") {
+        Serial.println("❌ ไปไม่ได้! r2 จอดขวางหรือกำลังมุ่งหน้าไปที่ " + getStationName(targetID));
         sendMqttSafe("agv/r1/status", "Standby (Blocked)");
       } else {
         targetStationID = targetID;
         isWaitingForCommand = false;
-        sendMqttSafe("agv/r1/status", ("Moving to " + targetStr).c_str());
+        sendMqttSafe("agv/r1/status", ("Moving to " + getStationName(targetID)).c_str());
         sendMqttSafe("agv/r1/station", "MOVING");
       }
     }
@@ -163,9 +184,11 @@ void setup() {
     String statusStr = String(payload);
     if (statusStr.startsWith("Moving to ")) {
       friendTarget = statusStr.substring(10);
+      isR2Working = true; // 🌟 อัปเดตว่า r2 กำลังทำงาน
       Serial.println("[MQTT RECV] r2 target destination: " + friendTarget);
     } else if (statusStr.startsWith("Standby")) {
       friendTarget = "NONE";
+      isR2Working = false; // 🌟 อัปเดตว่า r2 ว่างแล้ว
     }
   });
 
@@ -206,10 +229,10 @@ void robotControlTask(void* pvParameters) {
     //   lastIRDebug = millis();
     // }
 
-    if (millis() - lastStateDebug > 1000) {
-      Serial.println("[SYS DEBUG] Curr:" + getStationName(currentStationID) + " | Target:" + getStationName(targetStationID) + " | r2_at:" + friendStation + " | r2_target:" + friendTarget);
-      lastStateDebug = millis();
-    }
+    // if (millis() - lastStateDebug > 1000) {
+    //   Serial.println("[SYS DEBUG] Curr:" + getStationName(currentStationID) + " | Target:" + getStationName(targetStationID) + " | r2_at:" + friendStation + " | r2_target:" + friendTarget);
+    //   lastStateDebug = millis();
+    // }
 
     if (millis() - lastAppUpdate > 2000) {
       if (isWaitingForCommand) {
@@ -244,16 +267,16 @@ void colorSensorTask(void* pvParameters) {
     uint8_t tempColorID = 0;
     String detectedColor = "START_OR_PATH";
 
-    if (r > 90 && g > 140 && g < 240 && b > 150) {
+    if (r > 70 && g > 120 && g < 235 && b > 135 ) {
       detectedColor = "START_OR_PATH";
       tempColorID = 0;
     } else if (r > g && r > b && r > 60) {
       detectedColor = "RED_S2";
       tempColorID = 2;  // RED_S2 = 2
-    } else if (r > 80 && r < 165 && g > 160 && g < 360 && b > 90 && b < 230) {
+    } else if (r > 74 && r < 165 && g > 165 && g < 360 && b > 90 && b < 225) {
       detectedColor = "GREEN_S3";
       tempColorID = 3;  // GREEN_S3 = 3
-    } else if (r > 30 && r < 90 && g > 90 && g < 200 && b > 140 && b < 300) {
+    } else if (r > 30 && r < 100 && g > 95 && g < 250 && b > 140 && b < 370) { 
       detectedColor = "BLUE_S1";
       tempColorID = 1;  // BLUE_S1 = 1
     } else {
@@ -276,6 +299,20 @@ void moveForward() {
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, HIGH);
   digitalWrite(IN4, LOW);
+}
+
+void moveRight() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void moveLeft() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
 }
 
 void stopMotor() {
@@ -327,19 +364,13 @@ bool lineTracking() {
     analogWrite(ENB, motorSpeed);
     moveForward();
   } else if (valLeft == 0 && valRight == 1) {
-    analogWrite(ENA, 55);
-    analogWrite(ENB, 80);
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
+    analogWrite(ENA, 75);
+    analogWrite(ENB, 75);
+    moveRight();
   } else if (valLeft == 1 && valRight == 0) {
-    analogWrite(ENA, 80);
-    analogWrite(ENB, 55);
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, LOW);
-    digitalWrite(IN4, HIGH);
+    analogWrite(ENA, 75);
+    analogWrite(ENB, 100);
+    moveLeft();
   }
   return false;
 }
@@ -395,7 +426,7 @@ void handleIntersection() {
 
   // 🌟 ประกาศตัวแปรเช็กสถานะการบล็อกของ r2 ให้ครบถ้วน
   bool isR2BlockingBlue = (friendStation == "BLUE_S1" || friendTarget == "BLUE_S1");
-  bool isR2BlockingRed = (friendStation == "Red_S2" || friendTarget == "RED_S2");
+  bool isR2BlockingRed = (friendStation == "RED_S2" || friendTarget == "RED_S2");
   bool isR2BlockingGreen = (friendStation == "GREEN_S3" || friendTarget == "GREEN_S3");
   bool isR2BlockingStart = (friendStation == "START" || friendTarget == "START");
 
@@ -469,16 +500,13 @@ void turnLeft() {
     analogWrite(ENA, kickSpeed);
     analogWrite(ENB, kickSpeed);
     moveForward();
-    delay(250);
+    delay(200);
     isStopped = false;
   }
   if (isWaitingForCommand) return;
   analogWrite(ENA, turnSpeed);
   analogWrite(ENB, turnSpeed);
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
+  moveLeft();
   int blackCount = 0;
   int lastState = digitalRead(sensorLeft);
   while (blackCount < 1) {
@@ -502,7 +530,7 @@ void turnRight() {
     analogWrite(ENA, kickSpeed);
     analogWrite(ENB, kickSpeed);
     moveForward();
-    delay(250);
+    delay(300);
     isStopped = false;
   }
   if (isWaitingForCommand) return;
@@ -533,7 +561,7 @@ void skipIntersection() {
     analogWrite(ENA, kickSpeed);
     analogWrite(ENB, kickSpeed);
     moveForward();
-    delay(250);
+    delay(275);
     isStopped = false;
   }
   while (true) {
