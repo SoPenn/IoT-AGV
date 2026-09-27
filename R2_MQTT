@@ -29,11 +29,13 @@ const int ENB = 27;
 const int sensorLeft = 14;
 const int sensorRight = 13;
 
-int motorSpeed = 63;
-int turnSpeed = 65;
+int motorSpeed = 65;
+int turnSpeed = 68;
 int kickSpeed = 90;
 int kickDuration_ms = 300;
 bool isStopped = true;
+
+int I = 0;
 
 Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
 
@@ -44,6 +46,9 @@ String targetStation = "NONE";
 bool isWaitingForCommand = true;
 String globalDetectedColor = "START_OR_PATH";
 
+volatile bool isR1Working = false;        // 🌟 เพิ่มตัวแปรเช็กว่า r1 กำลังทำงานอยู่หรือไม่ เพื่อบังคับให้ทำทีละตัว
+volatile bool forceTurnLeftFlag = false;  // 🌟 เพิ่มประกาศตัวแปรแก้ Error ใน lineTracking()
+
 TaskHandle_t RobotTask;
 TaskHandle_t ColorTask;
 
@@ -53,7 +58,10 @@ void handleIntersection();
 void skipIntersection();
 void turnRight();
 void turnLeft();
+void turnLeftImmediate();
 void moveForward();
+void moveRight();
+void moveLeft();
 void stopMotor();
 void arrivedAtStart();
 void runRoute(const char* route);
@@ -112,6 +120,26 @@ void setup() {
     else if (cmd == "GO_START") target = "START";
 
     if (target != "") {
+
+      // 🌟 1. ป้องกันการกดสั่งซ้ำขณะหุ่นยนต์กำลังทำงาน
+      if (!isWaitingForCommand) {
+        Serial.println("❌ ไม่อนุญาตให้ทำงาน! หุ่นยนต์ r2 กำลังวิ่งอยู่ (ไม่รับคำสั่งซ้อน)");
+        return;  // ปฏิเสธคำสั่งและออกจากฟังก์ชัน
+      }
+
+      // 🌟 2. ป้องกันการสั่งไปเป้าหมายที่เป็นจุดเดียวกับจุดที่จอดอยู่ปัจจุบัน
+      if (target == currentStation) {
+        Serial.println("❌ ไม่อนุญาตให้ทำงาน! หุ่นยนต์ r2 อยู่ที่ " + currentStation + " อยู่แล้ว");
+        return;  // ปฏิเสธคำสั่งและออกจากฟังก์ชัน
+      }
+
+      // 🌟 ระบบล็อกการทำงานทีละตัว: ถ้า r1 กำลังวิ่งอยู่ r2 จะปฏิเสธคำสั่ง
+      if (isR1Working) {
+        Serial.println("❌ ไม่อนุญาตให้ทำงาน! หุ่นยนต์ r1 กำลังทำงานอยู่ (ระบบบังคับทำทีละตัว)");
+        sendMqttSafe("agv/r2/status", "Standby (Waiting for R1)");
+        return;  // ปฏิเสธคำสั่งและออกจากฟังก์ชัน
+      }
+
       // 🚨 ระบบกันชนอัจฉริยะ: เช็กทั้งตำแหน่งและเป้าหมายล่วงหน้าของ r1
       bool isR1AtTarget = (friendStation == target);
       bool isR1TargetingIt = (friendTarget == target);
@@ -139,9 +167,11 @@ void setup() {
     String statusStr = String(payload);
     if (statusStr.startsWith("Moving to ")) {
       friendTarget = statusStr.substring(10);  // เอาเฉพาะชื่อสถานีเป้าหมาย
+      isR1Working = true;                      // 🌟 อัปเดตว่า r1 กำลังทำงาน
       Serial.println("[MQTT RECV] r1 target destination: " + friendTarget);
     } else if (statusStr.startsWith("Standby") || statusStr.startsWith("Stopped")) {
       friendTarget = "NONE";  // เคลียร์เป้าหมายถ้า r1 จอดแล้ว
+      isR1Working = false;    // 🌟 อัปเดตว่า r1 ว่างแล้ว
     }
   });
 
@@ -179,17 +209,17 @@ void robotControlTask(void* pvParameters) {
   static unsigned long lastAppUpdate = 0;
 
   for (;;) {
-    if (millis() - lastIRDebug > 200) {
-      int valLeft = digitalRead(sensorLeft);
-      int valRight = digitalRead(sensorRight);
-      Serial.println("[IR DEBUG] L:" + String(valLeft) + " | R:" + String(valRight));
-      lastIRDebug = millis();
-    }
+    // if (millis() - lastIRDebug > 200) {
+    //   int valLeft = digitalRead(sensorLeft);
+    //   int valRight = digitalRead(sensorRight);
+    //   Serial.println("[IR DEBUG] L:" + String(valLeft) + " | R:" + String(valRight));
+    //   lastIRDebug = millis();
+    // }
 
-    if (millis() - lastStateDebug > 1000) {
-      Serial.println("[SYS DEBUG] Curr:" + currentStation + " | Target:" + targetStation + " | r1_at:" + friendStation + " | r1_target:" + friendTarget);
-      lastStateDebug = millis();
-    }
+    // if (millis() - lastStateDebug > 1000) {
+    //   Serial.println("[SYS DEBUG] Curr:" + currentStation + " | Target:" + targetStation + " | r1_at:" + friendStation + " | r1_target:" + friendTarget);
+    //   lastStateDebug = millis();
+    // }
 
     if (millis() - lastAppUpdate > 2000) {
       if (isWaitingForCommand) {
@@ -224,7 +254,7 @@ void colorSensorTask(void* pvParameters) {
 
     String detectedColor = "START_OR_PATH";
 
-    if (r > 90 && g > 140 && g < 240 && b > 150) {
+    if (r > 87 && g > 140 && g < 240 && b > 130) {
       detectedColor = "START_OR_PATH";
     } else if (r > g && r > b && r > 60) {
       detectedColor = "RED_S2";
@@ -252,6 +282,20 @@ void moveForward() {
   digitalWrite(IN4, LOW);
 }
 
+void moveRight() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void moveLeft() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
 void stopMotor() {
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, LOW);
@@ -277,6 +321,13 @@ bool checkArrivalByColor() {
 }
 
 bool lineTracking() {
+  if (I == 0) {
+    if (turnLeftImmediate) 
+    I = 1;
+    return true;
+  }
+
+  // 🌟 แทรกระบบเลี้ยวซ้ายฉุกเฉิน
   if (checkArrivalByColor()) return true;
   int valLeft = digitalRead(sensorLeft);
   int valRight = digitalRead(sensorRight);
@@ -286,6 +337,7 @@ bool lineTracking() {
     delay(400);
     return true;
   }
+
   if (isStopped == true) {
     analogWrite(ENA, kickSpeed);
     analogWrite(ENB, kickSpeed);
@@ -301,17 +353,11 @@ bool lineTracking() {
   } else if (valLeft == 0 && valRight == 1) {
     analogWrite(ENA, 90);
     analogWrite(ENB, 60);
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
+    moveRight();
   } else if (valLeft == 1 && valRight == 0) {
-    analogWrite(ENA, 90);
-    analogWrite(ENB, 60);
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, LOW);
-    digitalWrite(IN4, HIGH);
+    analogWrite(ENA, 60);
+    analogWrite(ENB, 90);
+    moveLeft();
   }
   return false;
 }
@@ -366,9 +412,26 @@ void handleIntersection() {
   bool isR1BlockingRed = (friendStation == "RED_S2" || friendTarget == "RED_S2");
 
   if (currentStation == "START") {
-    if (targetStation == "BLUE_S1") runRoute("LSRSSR");
-    else if (targetStation == "RED_S2") runRoute("LSRSR");
-    else if (targetStation == "GREEN_S3") runRoute("L");
+    if (targetStation == "BLUE_S1") {
+      if (isR1BlockingGreen) {
+        Serial.println("🔄 r2 อยู่start แต่ r1 ขวางสีเขียว -> เปิดใช้ฟังก์ชันเบี่ยงเส้นทาง!");
+        turnLeftImmediate();
+        runDetourRoute("SRSSSR");
+        I = 0;
+      } else {
+        runRoute("LSRSSR");
+      }
+    } else if (targetStation == "RED_S2") {
+      if (isR1BlockingGreen) {
+        Serial.println("🔄 r2 อยู่start แต่ r1 ขวางสีเขียว -> เปิดใช้ฟังก์ชันเบี่ยงเส้นทาง!");
+        turnLeftImmediate();
+        runDetourRoute("SRSSR");
+        I = 0;
+      } else {
+        runRoute("LSRSR");
+      }
+    } else if (targetStation == "GREEN_S3") runRoute("L");
+
   } else if (currentStation == "BLUE_S1") {
     if (targetStation == "RED_S2") {
       if (isR1BlockingGreen) {
@@ -429,9 +492,7 @@ void turnLeft() {
   analogWrite(ENA, turnSpeed);
   analogWrite(ENB, turnSpeed);
   digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
+  moveLeft();
   int blackCount = 0;
   int lastState = digitalRead(sensorLeft);
   while (blackCount < 1) {
@@ -444,6 +505,31 @@ void turnLeft() {
   if (isWaitingForCommand) return;
   stopMotor();
   isStopped = false;
+}
+
+void turnLeftImmediate() {
+  if (isWaitingForCommand) return;
+  Serial.println("[ACTION] Turn Left");
+  stopMotor();
+  delay(250);
+
+  if (isWaitingForCommand) return;
+  analogWrite(ENA, turnSpeed);
+  analogWrite(ENB, turnSpeed);
+  moveLeft();
+  int blackCount = 0;
+  int lastState = digitalRead(sensorLeft);
+  while (blackCount < 1) {
+    if (checkArrivalByColor() || isWaitingForCommand) return;
+    int currentState = digitalRead(sensorLeft);
+    if (lastState == 0 && currentState == 1) blackCount++;
+    lastState = currentState;
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+  }
+  if (isWaitingForCommand) return;
+  stopMotor();
+  isStopped = false;
+  return;
 }
 
 void turnRight() {
@@ -461,10 +547,7 @@ void turnRight() {
   if (isWaitingForCommand) return;
   analogWrite(ENA, turnSpeed);
   analogWrite(ENB, turnSpeed);
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
+  moveRight();
   int blackCount = 0;
   int lastState = digitalRead(sensorRight);
   while (blackCount < 1) {
